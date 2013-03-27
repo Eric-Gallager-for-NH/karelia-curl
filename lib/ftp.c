@@ -598,17 +598,17 @@ static CURLcode AllowServerConnect(struct connectdata *conn, bool *connected)
 /* macro to check for the last line in an FTP server response */
 #define LASTLINE(line) (STATUSCODE(line) && (' ' == line[3]))
 
-static int ftp_endofresp(struct pingpong *pp,
-                         int *code)
+static bool ftp_endofresp(struct connectdata *conn, char *line, size_t len,
+                          int *code)
 {
-  char *line = pp->linestart_resp;
-  size_t len = pp->nread_resp;
+  (void)conn;
 
   if((len > 3) && LASTLINE(line)) {
     *code = curlx_sltosi(strtol(line, NULL, 10));
-    return 1;
+    return TRUE;
   }
-  return 0;
+
+  return FALSE;
 }
 
 static CURLcode ftp_readresp(curl_socket_t sockfd,
@@ -3124,7 +3124,7 @@ static CURLcode ftp_multi_statemach(struct connectdata *conn,
                                     bool *done)
 {
   struct ftp_conn *ftpc = &conn->proto.ftpc;
-  CURLcode result = Curl_pp_multi_statemach(&ftpc->pp);
+  CURLcode result = Curl_pp_statemach(&ftpc->pp, FALSE);
 
   /* Check for the state outside of the Curl_socket_ready() return code checks
      since at times we are in fact already in this state when this function
@@ -3134,14 +3134,14 @@ static CURLcode ftp_multi_statemach(struct connectdata *conn,
   return result;
 }
 
-static CURLcode ftp_easy_statemach(struct connectdata *conn)
+static CURLcode ftp_block_statemach(struct connectdata *conn)
 {
   struct ftp_conn *ftpc = &conn->proto.ftpc;
   struct pingpong *pp = &ftpc->pp;
   CURLcode result = CURLE_OK;
 
   while(ftpc->state != FTP_STOP) {
-    result = Curl_pp_easy_statemach(pp);
+    result = Curl_pp_statemach(pp, TRUE);
     if(result)
       break;
   }
@@ -3978,16 +3978,11 @@ static CURLcode wc_statemach(struct connectdata *conn)
     /* filelist has at least one file, lets get first one */
     struct ftp_conn *ftpc = &conn->proto.ftpc;
     struct curl_fileinfo *finfo = wildcard->filelist->head->ptr;
-    char *tmp_path = malloc(strlen(conn->data->state.path) +
-                      strlen(finfo->filename) + 1);
-    if(!tmp_path) {
-      return CURLE_OUT_OF_MEMORY;
-    }
 
-    tmp_path[0] = 0;
-    /* make full path to matched file */
-    strcat(tmp_path, wildcard->path);
-    strcat(tmp_path, finfo->filename);
+    char *tmp_path = aprintf("%s%s", wildcard->path, finfo->filename);
+    if(!tmp_path)
+      return CURLE_OUT_OF_MEMORY;
+
     /* switch default "state.pathbuffer" and tmp_path, good to see
        ftp_parse_url_path function to understand this trick */
     Curl_safefree(conn->data->state.pathbuffer);
@@ -4124,13 +4119,13 @@ CURLcode Curl_ftpsendf(struct connectdata *conn,
 
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(s, SBUF_SIZE-3, fmt, ap);
+  write_len = vsnprintf(s, SBUF_SIZE-3, fmt, ap);
   va_end(ap);
 
-  strcat(s, "\r\n"); /* append a trailing CRLF */
+  strcpy(&s[write_len], "\r\n"); /* append a trailing CRLF */
+  write_len +=2;
 
   bytes_written=0;
-  write_len = strlen(s);
 
   res = Curl_convert_to_network(conn->data, s, write_len);
   /* Curl_convert_to_network calls failf if unsuccessful */
@@ -4193,7 +4188,7 @@ static CURLcode ftp_quit(struct connectdata *conn)
 
     state(conn, FTP_QUIT);
 
-    result = ftp_easy_statemach(conn);
+    result = ftp_block_statemach(conn);
   }
 
   return result;

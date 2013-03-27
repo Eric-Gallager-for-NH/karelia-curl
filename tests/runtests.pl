@@ -140,6 +140,7 @@ my $GOPHER6PORT;         # Gopher IPv6 server port
 my $HTTPTLSPORT;         # HTTP TLS (non-stunnel) server port
 my $HTTPTLS6PORT;        # HTTP TLS (non-stunnel) IPv6 server port
 my $HTTPPROXYPORT;       # HTTP proxy port, when using CONNECT
+my $HTTPPIPEPORT;        # HTTP pipelining port
 
 my $srcdir = $ENV{'srcdir'} || '.';
 my $CURL="../src/curl".exe_ext(); # what curl executable to run on the tests
@@ -175,8 +176,8 @@ my $TESTCASES="all";
 my $perl="perl -I$srcdir";
 my $server_response_maxtime=13;
 
-my $debug_build=0; # curl built with --enable-debug
-my $curl_debug=0;  # curl built with --enable-curldebug (memory tracking)
+my $debug_build=0;          # built debug enabled (--enable-debug)
+my $has_memory_tracking=0;  # built with memory tracking (--enable-curldebug)
 my $libtool;
 
 # name of the file that the memory debugging creates:
@@ -213,13 +214,14 @@ my $has_charconv;# set if libcurl is built with CharConv support
 my $has_tls_srp; # set if libcurl is built with TLS-SRP support
 my $has_metalink;# set if curl is built with Metalink support
 
-my $has_openssl; # built with a lib using an OpenSSL-like API
-my $has_gnutls;  # built with GnuTLS
-my $has_nss;     # built with NSS
-my $has_yassl;   # built with yassl
-my $has_polarssl;# built with polarssl
-my $has_axtls;   # built with axTLS
-my $has_winssl;  # built with WinSSL (Schannel/SSPI)
+my $has_openssl;  # built with a lib using an OpenSSL-like API
+my $has_gnutls;   # built with GnuTLS
+my $has_nss;      # built with NSS
+my $has_yassl;    # built with yassl
+my $has_polarssl; # built with polarssl
+my $has_axtls;    # built with axTLS
+my $has_winssl;   # built with WinSSL (Schannel/SSPI)
+my $has_darwinssl;# build with DarwinSSL (Secure Transport)
 
 my $has_shared = "unknown";  # built shared
 
@@ -338,10 +340,10 @@ delete $ENV{'CURL_CA_BUNDLE'} if($ENV{'CURL_CA_BUNDLE'});
 # Load serverpidfile hash with pidfile names for all possible servers.
 #
 sub init_serverpidfile_hash {
-  for my $proto (('ftp', 'http', 'imap', 'pop3', 'smtp')) {
+  for my $proto (('ftp', 'http', 'imap', 'pop3', 'smtp', 'http')) {
     for my $ssl (('', 's')) {
       for my $ipvnum ((4, 6)) {
-        for my $idnum ((1, 2)) {
+        for my $idnum ((1, 2, 3)) {
           my $serv = servername_id("$proto$ssl", $ipvnum, $idnum);
           my $pidf = server_pidfilename("$proto$ssl", $ipvnum, $idnum);
           $serverpidfile{$serv} = $pidf;
@@ -641,11 +643,11 @@ sub stopserver {
     # All servers relative to the given one must be stopped also
     #
     my @killservers;
-    if($server =~ /^(ftp|http|imap|pop3|smtp)s((\d*)(-ipv6|))$/) {
+    if($server =~ /^(ftp|http|imap|pop3|smtp|httppipe)s((\d*)(-ipv6|))$/) {
         # given a stunnel based ssl server, also kill non-ssl underlying one
         push @killservers, "${1}${2}";
     }
-    elsif($server =~ /^(ftp|http|imap|pop3|smtp)((\d*)(-ipv6|))$/) {
+    elsif($server =~ /^(ftp|http|imap|pop3|smtp|httppipe)((\d*)(-ipv6|))$/) {
         # given a non-ssl server, also kill stunnel based ssl piggybacking one
         push @killservers, "${1}s${2}";
     }
@@ -1104,6 +1106,7 @@ my %protofunc = ('http' => \&verifyhttp,
                  'pop3' => \&verifyftp,
                  'imap' => \&verifyftp,
                  'smtp' => \&verifyftp,
+                 'httppipe' => \&verifyhttp,
                  'ftps' => \&verifyftp,
                  'tftp' => \&verifyftp,
                  'ssh' => \&verifyssh,
@@ -1169,6 +1172,7 @@ sub runhttpserver {
     my $pidfile;
     my $logfile;
     my $flags = "";
+    my $exe = "$perl $srcdir/httpserver.pl";
 
     if($alt eq "ipv6") {
         # if IPv6, use a different setup
@@ -1178,6 +1182,11 @@ sub runhttpserver {
     elsif($alt eq "proxy") {
         # basically the same, but another ID
         $idnum = 2;
+    }
+    elsif($alt eq "pipe") {
+        # basically the same, but another ID
+        $idnum = 3;
+	$exe = "python $srcdir/http_pipe.py";
     }
 
     $server = servername_id($proto, $ipvnum, $idnum);
@@ -1206,7 +1215,82 @@ sub runhttpserver {
     $flags .= "--id $idnum " if($idnum > 1);
     $flags .= "--ipv$ipvnum --port $port --srcdir \"$srcdir\"";
 
-    my $cmd = "$perl $srcdir/httpserver.pl $flags";
+    my $cmd = "$exe $flags";
+    my ($httppid, $pid2) = startnew($cmd, $pidfile, 15, 0);
+
+    if($httppid <= 0 || !kill(0, $httppid)) {
+        # it is NOT alive
+        logmsg "RUN: failed to start the $srvrname server\n";
+        stopserver($server, "$pid2");
+        displaylogs($testnumcheck);
+        $doesntrun{$pidfile} = 1;
+        return (0,0);
+    }
+
+    # Server is up. Verify that we can speak to it.
+    my $pid3 = verifyserver($proto, $ipvnum, $idnum, $ip, $port);
+    if(!$pid3) {
+        logmsg "RUN: $srvrname server failed verification\n";
+        # failed to talk to it properly. Kill the server and return failure
+        stopserver($server, "$httppid $pid2");
+        displaylogs($testnumcheck);
+        $doesntrun{$pidfile} = 1;
+        return (0,0);
+    }
+    $pid2 = $pid3;
+
+    if($verbose) {
+        logmsg "RUN: $srvrname server is now running PID $httppid\n";
+    }
+
+    sleep(1);
+
+    return ($httppid, $pid2);
+}
+
+#######################################################################
+# start the http server
+#
+sub runhttp_pipeserver {
+    my ($proto, $verbose, $alt, $port) = @_;
+    my $ip = $HOSTIP;
+    my $ipvnum = 4;
+    my $idnum = 1;
+    my $server;
+    my $srvrname;
+    my $pidfile;
+    my $logfile;
+    my $flags = "";
+
+    if($alt eq "ipv6") {
+        # No IPv6
+    }
+
+    $server = servername_id($proto, $ipvnum, $idnum);
+
+    $pidfile = $serverpidfile{$server};
+
+    # don't retry if the server doesn't work
+    if ($doesntrun{$pidfile}) {
+        return (0,0);
+    }
+
+    my $pid = processexists($pidfile);
+    if($pid > 0) {
+        stopserver($server, "$pid");
+    }
+    unlink($pidfile) if(-f $pidfile);
+
+    $srvrname = servername_str($proto, $ipvnum, $idnum);
+
+    $logfile = server_logfilename($LOGDIR, $proto, $ipvnum, $idnum);
+
+    $flags .= "--verbose " if($debugprotocol);
+    $flags .= "--pidfile \"$pidfile\" --logfile \"$logfile\" ";
+    $flags .= "--id $idnum " if($idnum > 1);
+    $flags .= "--port $port --srcdir \"$srcdir\"";
+
+    my $cmd = "$srcdir/http_pipe.py $flags";
     my ($httppid, $pid2) = startnew($cmd, $pidfile, 15, 0);
 
     if($httppid <= 0 || !kill(0, $httppid)) {
@@ -2258,6 +2342,10 @@ sub checksystem {
                $has_axtls=1;
                $ssllib="axTLS";
            }
+           elsif ($libcurl =~ /securetransport/i) {
+               $has_darwinssl=1;
+               $ssllib="DarwinSSL";
+           }
         }
         elsif($_ =~ /^Protocols: (.*)/i) {
             # these are the protocols compiled in to this libcurl
@@ -2271,14 +2359,17 @@ sub checksystem {
             # 'http-proxy' is used in test cases to do CONNECT through
             push @protocols, 'http-proxy';
 
+            # 'http-pipe' is the special server for testing pipelining
+            push @protocols, 'http-pipe';
+
             # 'none' is used in test cases to mean no server
             push @protocols, 'none';
         }
         elsif($_ =~ /^Features: (.*)/i) {
             $feat = $1;
             if($feat =~ /TrackMemory/i) {
-                # curl was built with --enable-curldebug (memory tracking)
-                $curl_debug = 1;
+                # built with memory tracking support (--enable-curldebug)
+                $has_memory_tracking = 1;
             }
             if($feat =~ /debug/i) {
                 # curl was built with --enable-debug
@@ -2396,8 +2487,9 @@ sub checksystem {
         }
     }
 
-    if(!$curl_debug && $torture) {
-        die "can't run torture tests since curl was not built with curldebug";
+    if(!$has_memory_tracking && $torture) {
+        die "can't run torture tests since curl was built without ".
+            "TrackMemory feature (--enable-curldebug)";
     }
 
     $has_shared = `sh $CURLCONFIG --built-shared`;
@@ -2420,7 +2512,7 @@ sub checksystem {
     logmsg sprintf("* Server SSL:   %8s", $stunnel?"ON ":"OFF");
     logmsg sprintf("  libcurl SSL:  %s\n", $ssl_version?"ON ":"OFF");
     logmsg sprintf("* debug build:  %8s", $debug_build?"ON ":"OFF");
-    logmsg sprintf("  track memory: %s\n", $curl_debug?"ON ":"OFF");
+    logmsg sprintf("  track memory: %s\n", $has_memory_tracking?"ON ":"OFF");
     logmsg sprintf("* valgrind:     %8s", $valgrind?"ON ":"OFF");
     logmsg sprintf("  HTTP IPv6     %s\n", $http_ipv6?"ON ":"OFF");
     logmsg sprintf("* FTP IPv6      %8s", $ftp_ipv6?"ON ":"OFF");
@@ -2472,6 +2564,7 @@ sub checksystem {
         }
         logmsg "\n";
     }
+    logmsg sprintf("*   HTTP-PIPE/%d \n", $HTTPPIPEPORT);
 
     $has_textaware = ($^O eq 'MSWin32') || ($^O eq 'msys');
 
@@ -2500,6 +2593,7 @@ sub subVariables {
   $$thing =~ s/%HTTP6PORT/$HTTP6PORT/g;
   $$thing =~ s/%HTTPSPORT/$HTTPSPORT/g;
   $$thing =~ s/%HTTPPORT/$HTTPPORT/g;
+  $$thing =~ s/%HTTPPIPEPORT/$HTTPPIPEPORT/g;
   $$thing =~ s/%PROXYPORT/$HTTPPROXYPORT/g;
 
   $$thing =~ s/%IMAP6PORT/$IMAP6PORT/g;
@@ -2682,6 +2776,11 @@ sub singletest {
                 next;
             }
         }
+        elsif($f eq "DarwinSSL") {
+            if($has_darwinssl) {
+                next;
+            }
+        }
         elsif($f eq "unittest") {
             if($debug_build) {
                 next;
@@ -2689,6 +2788,11 @@ sub singletest {
         }
         elsif($f eq "debug") {
             if($debug_build) {
+                next;
+            }
+        }
+        elsif($f eq "TrackMemory") {
+            if($has_memory_tracking) {
                 next;
             }
         }
@@ -2966,7 +3070,7 @@ sub singletest {
         # there was no command given, use something silly
         $cmd="-";
     }
-    if($curl_debug) {
+    if($has_memory_tracking) {
         unlink($memdump);
     }
 
@@ -3561,9 +3665,9 @@ sub singletest {
         return 1;
     }
 
-    if($curl_debug) {
+    if($has_memory_tracking) {
         if(! -f $memdump) {
-            logmsg "\n** ALERT! memory debugging with no output file?\n"
+            logmsg "\n** ALERT! memory tracking with no output file?\n"
                 if(!$cmdtype eq "perl");
         }
         else {
@@ -3858,6 +3962,23 @@ sub startservers {
                 logmsg sprintf("* pid http-ipv6 => %d %d\n", $pid, $pid2)
                     if($verbose);
                 $run{'http-ipv6'}="$pid $pid2";
+            }
+        }
+        elsif($what eq "http-pipe") {
+            if($torture && $run{'http-pipe'} &&
+               !responsive_http_server("http", $verbose, "pipe",
+                                       $HTTPPIPEPORT)) {
+                stopserver('http-pipe');
+            }
+            if(!$run{'http-pipe'}) {
+                ($pid, $pid2) = runhttpserver("http", $verbose, "pipe",
+                                              $HTTPPIPEPORT);
+                if($pid <= 0) {
+                    return "failed starting HTTP-pipe server";
+                }
+                logmsg sprintf ("* pid http-pipe => %d %d\n", $pid, $pid2)
+                    if($verbose);
+                $run{'http-pipe'}="$pid $pid2";
             }
         }
         elsif($what eq "rtsp") {
@@ -4502,6 +4623,7 @@ $GOPHER6PORT     = $base++; # Gopher IPv6 server port
 $HTTPTLSPORT     = $base++; # HTTP TLS (non-stunnel) server port
 $HTTPTLS6PORT    = $base++; # HTTP TLS (non-stunnel) IPv6 server port
 $HTTPPROXYPORT   = $base++; # HTTP proxy port, when using CONNECT
+$HTTPPIPEPORT    = $base++; # HTTP pipelining port
 
 #######################################################################
 # clear and create logging directory:
