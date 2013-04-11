@@ -668,8 +668,8 @@ static CURLcode ssh_check_fingerprint(struct connectdata *conn)
         failf(data,
             "Denied establishing ssh session: md5 fingerprint not available");
       state(conn, SSH_SESSION_FREE);
-      ssh_set_code_and_ssh_error(conn, CURLE_PEER_FAILED_VERIFICATION, LIBSSH2_ERROR_NONE);
-      return sshc->actualcode;
+      return ssh_set_code_and_ssh_error(conn, CURLE_PEER_FAILED_VERIFICATION, LIBSSH2_ERROR_NONE);
+
     }
     else {
       infof(data, "MD5 checksum match!\n");
@@ -681,22 +681,30 @@ static CURLcode ssh_check_fingerprint(struct connectdata *conn)
     return ssh_knownhost(conn);
 }
 
-static CURLcode ssh_set_code_and_ssh_error(struct connectdata *conn, CURLcode code, int ssh_error)
+/*
+ * set the actualcode value explicitly
+ * the ssh_error value is returned to in httpcode and can be extracted with CURLINFO_RESPONSE_CODE 
+ */
+
+static CURLcode ssh_set_code_and_ssh_error(struct connectdata *conn,
+                                           CURLcode code,
+                                           int ssh_error)
 {
-    /* set the actualcode value explicitly */
-    /* the ssh_error value is returned to in httpcode and can be extracted with CURLINFO_RESPONSE_CODE */
-    struct ssh_conn *sshc = &conn->proto.sshc;
-    sshc->actualcode = code;
-    struct SessionHandle *data = conn->data;
-    data->info.httpcode = ssh_error;
+    conn->proto.sshc.actualcode = code;
+    conn->data->info.httpcode = ssh_error;
 
     return code;
 }
 
-static CURLcode ssh_set_code_from_ssh_error_with_default_code(struct connectdata *conn, int ssh_error, CURLcode default_code)
+/*
+ * set the actualcode value from an SSH error value
+ * if the converted SSH error is zero, we use the supplied default_code value instead for actualcode 
+ */
+
+static CURLcode ssh_set_code_from_ssh_error_with_default_code(struct connectdata *conn,
+                                                              int ssh_error,
+                                                              CURLcode default_code)
 {
-    /* set the actualcode value from an SSH error value */
-    /* if the converted SSH error is zero, we use the supplied default_code value instead for actualcode */
     CURLcode code = libssh2_session_error_to_CURLE(ssh_error);
     int result = ssh_set_code_and_ssh_error(conn, code ? code : default_code, ssh_error);
     DEBUGF(infof(conn->data, "error = %d makes libcurl = %d\n",
@@ -704,23 +712,72 @@ static CURLcode ssh_set_code_from_ssh_error_with_default_code(struct connectdata
 
 }
 
+/* 
+ * set the actualcode value from an SSH error value 
+ */
+
 static CURLcode ssh_set_code_from_ssh_error(struct connectdata *conn, int ssh_error)
 {
-    /* set the actualcode value from an SSH error value */
     return ssh_set_code_from_ssh_error_with_default_code(conn, ssh_error, CURLE_OK);
 }
 
-static void ssh_quote_fail(struct connectdata *conn, const char* format)
+
+/* 
+ * fail, reporting the curl error, the reason, and the ssh error if there was one 
+ */
+
+static void ssh_fail_with_result_error_detail(struct connectdata *conn,
+                                              CURLcode result,
+                                              int ssh_error,
+                                              const char* reason,
+                                              const char* detail)
+{
+    struct ssh_conn *sshc = &conn->proto.sshc;
+    if(result == CURLE_OUT_OF_MEMORY)
+        failf(conn->data, "Out of memory");
+    else
+        failf(conn->data, reason, detail);
+    Curl_safefree(sshc->quote_path1);
+    Curl_safefree(sshc->quote_path2);
+    state(conn, SSH_SFTP_CLOSE);
+    sshc->nextstate = SSH_NO_STATE;
+    ssh_set_code_and_ssh_error(conn, result, ssh_error);
+}
+
+/* 
+ * fail, reporting the curl error, and the reason - in this case there is no SSH error to report 
+ */
+
+static void ssh_fail_with_result(struct connectdata *conn,
+                                 CURLcode result,
+                                 const char* reason)
+{
+    ssh_fail_with_result_error_detail(conn, result, LIBSSH2_ERROR_NONE, reason, NULL);
+}
+
+/*
+ * fail, reporting a CURLE_QUOTE_ERROR, and the last ssh error 
+ */
+
+static void ssh_quote_fail(struct connectdata *conn, const char* reason)
 {
     struct ssh_conn *sshc = &conn->proto.sshc;
     struct SessionHandle *data = conn->data;
     int err = sftp_libssh2_last_error(sshc->sftp_session);
-    Curl_safefree(sshc->quote_path1);
-    Curl_safefree(sshc->quote_path2);
-    failf(data,format, sftp_libssh2_strerror(err));
-    state(conn, SSH_SFTP_CLOSE);
-    sshc->nextstate = SSH_NO_STATE;
-    ssh_set_code_and_ssh_error(conn, CURLE_QUOTE_ERROR, err);
+    ssh_fail_with_result_error_detail(conn, CURLE_QUOTE_ERROR, err, reason, sftp_libssh2_strerror(err));
+}
+
+/*
+ * fail, reporting a CURLE_QUOTE_ERROR, with no SSH error
+ */
+
+static void ssh_quote_fail_no_error(struct connectdata *conn, const char* reason)
+{
+    ssh_fail_with_result_error_detail(conn,
+                                      CURLE_QUOTE_ERROR,
+                                      LIBSSH2_ERROR_NONE,
+                                      reason,
+                                      NULL);
 }
 
 /*
@@ -1244,10 +1301,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
          */
         cp = strchr(cmd, ' ');
         if(cp == NULL) {
-          failf(data, "Syntax error in SFTP command. Supply parameter(s)!");
-          state(conn, SSH_SFTP_CLOSE);
-          sshc->nextstate = SSH_NO_STATE;
-          ssh_set_code_and_ssh_error(conn, CURLE_QUOTE_ERROR, LIBSSH2_ERROR_NONE);
+          ssh_quote_fail_no_error(conn, "Syntax error in SFTP command. Supply parameter(s)!");
           break;
         }
 
@@ -1257,13 +1311,8 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
          */
         result = get_pathname(&cp, &sshc->quote_path1);
         if(result) {
-          if(result == CURLE_OUT_OF_MEMORY)
-            failf(data, "Out of memory");
-          else
-            failf(data, "Syntax error: Bad first parameter");
-          state(conn, SSH_SFTP_CLOSE);
-          sshc->nextstate = SSH_NO_STATE;
-          ssh_set_code_and_ssh_error(conn, result, LIBSSH2_ERROR_NONE);
+            ssh_fail_with_result(conn, result,
+                "Syntax error: Bad first parameter");
           break;
         }
 
@@ -1282,15 +1331,8 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
           /* get the destination */
           result = get_pathname(&cp, &sshc->quote_path2);
           if(result) {
-            if(result == CURLE_OUT_OF_MEMORY)
-              failf(data, "Out of memory");
-            else
-              failf(data, "Syntax error in chgrp/chmod/chown: "
-                    "Bad second parameter");
-            Curl_safefree(sshc->quote_path1);
-            state(conn, SSH_SFTP_CLOSE);
-            sshc->nextstate = SSH_NO_STATE;
-            ssh_set_code_and_ssh_error(conn, result, LIBSSH2_ERROR_NONE);
+            ssh_fail_with_result(conn, result,
+                "Syntax error in chgrp/chmod/chown: Bad second parameter");
             break;
           }
           memset(&sshc->quote_attrs, 0, sizeof(LIBSSH2_SFTP_ATTRIBUTES));
@@ -1304,15 +1346,8 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
           /* get the destination */
           result = get_pathname(&cp, &sshc->quote_path2);
           if(result) {
-            if(result == CURLE_OUT_OF_MEMORY)
-              failf(data, "Out of memory");
-            else
-              failf(data,
-                    "Syntax error in ln/symlink: Bad second parameter");
-            Curl_safefree(sshc->quote_path1);
-            state(conn, SSH_SFTP_CLOSE);
-            sshc->nextstate = SSH_NO_STATE;
-            ssh_set_code_and_ssh_error(conn, result, LIBSSH2_ERROR_NONE);
+            ssh_fail_with_result(conn, result,
+                "Syntax error in ln/symlink: Bad second parameter");
             break;
           }
           state(conn, SSH_SFTP_QUOTE_SYMLINK);
@@ -1329,14 +1364,8 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
           /* second param is the dest. path */
           result = get_pathname(&cp, &sshc->quote_path2);
           if(result) {
-            if(result == CURLE_OUT_OF_MEMORY)
-              failf(data, "Out of memory");
-            else
-              failf(data, "Syntax error in rename: Bad second parameter");
-            Curl_safefree(sshc->quote_path1);
-            state(conn, SSH_SFTP_CLOSE);
-            sshc->nextstate = SSH_NO_STATE;
-            ssh_set_code_and_ssh_error(conn, result, LIBSSH2_ERROR_NONE);
+              ssh_fail_with_result(conn, result,
+                "Syntax error in rename: Bad second parameter");
             break;
           }
           state(conn, SSH_SFTP_QUOTE_RENAME);
@@ -1352,12 +1381,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
           break;
         }
 
-        failf(data, "Unknown SFTP command");
-        Curl_safefree(sshc->quote_path1);
-        Curl_safefree(sshc->quote_path2);
-        state(conn, SSH_SFTP_CLOSE);
-        sshc->nextstate = SSH_NO_STATE;
-        ssh_set_code_and_ssh_error(conn, CURLE_QUOTE_ERROR, LIBSSH2_ERROR_NONE);
+        ssh_quote_fail_no_error(conn, "Unknown SFTP command");
         break;
       }
     }
@@ -1425,12 +1449,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
         sshc->quote_attrs.flags = LIBSSH2_SFTP_ATTR_UIDGID;
         if(sshc->quote_attrs.gid == 0 && !ISDIGIT(sshc->quote_path1[0]) &&
            !sshc->acceptfail) {
-          Curl_safefree(sshc->quote_path1);
-          Curl_safefree(sshc->quote_path2);
-          failf(data, "Syntax error: chgrp gid not a number");
-          state(conn, SSH_SFTP_CLOSE);
-          sshc->nextstate = SSH_NO_STATE;
-          ssh_set_code_and_ssh_error(conn, CURLE_QUOTE_ERROR, LIBSSH2_ERROR_NONE);
+            ssh_quote_fail_no_error(conn, "Syntax error: chgrp gid not a number");
           break;
         }
       }
@@ -1440,12 +1459,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
         /* permissions are octal */
         if(sshc->quote_attrs.permissions == 0 &&
            !ISDIGIT(sshc->quote_path1[0])) {
-          Curl_safefree(sshc->quote_path1);
-          Curl_safefree(sshc->quote_path2);
-          failf(data, "Syntax error: chmod permissions not a number");
-          state(conn, SSH_SFTP_CLOSE);
-          sshc->nextstate = SSH_NO_STATE;
-          ssh_set_code_and_ssh_error(conn, CURLE_QUOTE_ERROR, LIBSSH2_ERROR_NONE);
+            ssh_quote_fail_no_error(conn, "Syntax error: chmod permissions not a number");
           break;
         }
       }
@@ -1454,12 +1468,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
         sshc->quote_attrs.flags = LIBSSH2_SFTP_ATTR_UIDGID;
         if(sshc->quote_attrs.uid == 0 && !ISDIGIT(sshc->quote_path1[0]) &&
            !sshc->acceptfail) {
-          Curl_safefree(sshc->quote_path1);
-          Curl_safefree(sshc->quote_path2);
-          failf(data, "Syntax error: chown uid not a number");
-          state(conn, SSH_SFTP_CLOSE);
-          sshc->nextstate = SSH_NO_STATE;
-          ssh_set_code_and_ssh_error(conn, CURLE_QUOTE_ERROR, LIBSSH2_ERROR_NONE);
+            ssh_quote_fail_no_error(conn, "Syntax error: chown uid not a number");
           break;
         }
       }
@@ -2970,6 +2979,7 @@ static ssize_t scp_send(struct connectdata *conn, int sockindex,
   }
   else if(nwrite < LIBSSH2_ERROR_NONE) {
     *err = libssh2_session_error_to_CURLE((int)nwrite);
+    conn->data->info.httpcode = nwrite;
     nwrite = -1;
   }
 
@@ -3113,6 +3123,7 @@ static ssize_t sftp_send(struct connectdata *conn, int sockindex,
   }
   else if(nwrite < LIBSSH2_ERROR_NONE) {
     *err = libssh2_session_error_to_CURLE((int)nwrite);
+    conn->data->info.httpcode = nwrite;
     nwrite = -1;
   }
 
