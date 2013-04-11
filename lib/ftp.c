@@ -878,14 +878,16 @@ static int ftp_domore_getsock(struct connectdata *conn, curl_socket_t *socks,
      remote site, or we could wait for that site to connect to us. Or just
      handle ordinary commands.
 
-     When waiting for a connect, we will be in FTP_STOP state and then we wait
-     for the secondary socket to become writeable. If we're in another state,
-     we're still handling commands on the control (primary) connection.
+     When waiting for a connect, we can be in FTP_STOP state (or we're in
+     FTP_STOR when we do an upload) and then we wait for the secondary socket
+     to become writeable. . If we're in another state, we're still handling
+     commands on the control (primary) connection.
 
   */
 
   switch(ftpc->state) {
   case FTP_STOP:
+  case FTP_STOR:
     break;
   default:
     return Curl_pp_getsock(&conn->proto.ftpc.pp, socks, numsocks);
@@ -1066,12 +1068,17 @@ static CURLcode ftp_state_use_port(struct connectdata *conn,
 
     if(*addr != '\0') {
       /* attempt to get the address of the given interface name */
-      if(!Curl_if2ip(conn->ip_addr->ai_family, addr,
-                     hbuf, sizeof(hbuf)))
-        /* not an interface, use the given string as host name instead */
-        host = addr;
-      else
-        host = hbuf; /* use the hbuf for host name */
+      switch(Curl_if2ip(conn->ip_addr->ai_family, conn->scope, addr,
+                     hbuf, sizeof(hbuf))) {
+        case IF2IP_NOT_FOUND:
+          /* not an interface, use the given string as host name instead */
+          host = addr;
+          break;
+        case IF2IP_AF_NOT_SUPPORTED:
+          return CURLE_FTP_PORT_FAILED;
+        case IF2IP_FOUND:
+          host = hbuf; /* use the hbuf for host name */
+      }
     }
     else
       /* there was only a port(-range) given, default the host */
@@ -2864,13 +2871,19 @@ static CURLcode ftp_statemach_act(struct connectdata *conn)
           return CURLE_OUT_OF_MEMORY;
 
         /* Reply format is like
-           257<space>"<directory-name>"<space><commentary> and the RFC959
-           says
+           257<space>[rubbish]"<directory-name>"<space><commentary> and the
+           RFC959 says
 
            The directory name can contain any character; embedded
            double-quotes should be escaped by double-quotes (the
            "quote-doubling" convention).
         */
+
+        /* scan for the first double-quote for non-standard responses */
+        while(ptr < &data->state.buffer[sizeof(data->state.buffer)]
+              && *ptr != '\n' && *ptr != '\0' && *ptr != '"')
+          ptr++;
+
         if('\"' == *ptr) {
           /* it started good */
           ptr++;
@@ -3367,7 +3380,7 @@ static CURLcode ftp_done(struct connectdata *conn, CURLcode status,
 #endif
 
   if(conn->sock[SECONDARYSOCKET] != CURL_SOCKET_BAD) {
-    if(!result && ftpc->dont_check && data->req.maxdownload > 0)
+    if(!result && ftpc->dont_check && data->req.maxdownload > 0) {
       /* partial download completed */
       result = Curl_pp_sendf(pp, "ABOR");
       if(result) {
@@ -3376,6 +3389,7 @@ static CURLcode ftp_done(struct connectdata *conn, CURLcode status,
         ftpc->ctl_valid = FALSE; /* mark control connection as bad */
         conn->bits.close = TRUE; /* mark for connection closure */
       }
+    }
 
     if(conn->ssl[SECONDARYSOCKET].use) {
       /* The secondary socket is using SSL so we must close down that part

@@ -276,7 +276,8 @@ CURLcode curl_global_init(long flags)
   }
 #endif
 
-  Curl_ack_eintr = flags & CURL_GLOBAL_ACK_EINTR;
+  if(flags & CURL_GLOBAL_ACK_EINTR)
+    Curl_ack_eintr = 1;
 
   init_flags  = flags;
 
@@ -441,6 +442,9 @@ CURLcode curl_easy_perform(CURL *easy)
       return CURLE_OUT_OF_MEMORY;
     data->multi_easy = multi;
   }
+
+  /* Copy the MAXCONNECTS option to the multi handle */
+  curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS, data->set.maxconnects);
 
   mcode = curl_multi_add_handle(multi, easy);
   if(mcode) {

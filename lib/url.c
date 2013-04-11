@@ -617,11 +617,8 @@ CURLcode Curl_open(struct SessionHandle **curl)
     data->wildcard.state = CURLWC_INIT;
     data->wildcard.filelist = NULL;
     data->set.fnmatch = ZERO_NULL;
-    /* This no longer creates a connection cache here. It is instead made on
-       the first call to curl_easy_perform() or when the handle is added to a
-       multi stack. */
+    data->set.maxconnects = DEFAULT_CONNCACHE_SIZE; /* for easy handles */
   }
-
 
   if(res) {
     Curl_resolver_cleanup(data->state.resolver);
@@ -2977,6 +2974,18 @@ ConnectionExists(struct SessionHandle *data,
           continue;
       }
 
+      if((needle->handler->protocol & CURLPROTO_FTP) ||
+         ((needle->handler->protocol & CURLPROTO_HTTP) && wantNTLM)) {
+         /* This is FTP or HTTP+NTLM, verify that we're using the same name
+            and password as well */
+         if(!strequal(needle->user, check->user) ||
+            !strequal(needle->passwd, check->passwd)) {
+            /* one of them was different */
+            continue;
+         }
+         credentialsMatch = TRUE;
+      }
+
       if(!needle->bits.httpproxy || needle->handler->flags&PROTOPT_SSL ||
          (needle->bits.httpproxy && check->bits.httpproxy &&
           needle->bits.tunnel_proxy && check->bits.tunnel_proxy &&
@@ -3009,17 +3018,6 @@ ConnectionExists(struct SessionHandle *data,
                            check->connection_id));
               continue;
             }
-          }
-          if((needle->handler->protocol & CURLPROTO_FTP) ||
-             ((needle->handler->protocol & CURLPROTO_HTTP) && wantNTLM)) {
-            /* This is FTP or HTTP+NTLM, verify that we're using the same name
-               and password as well */
-            if(!strequal(needle->user, check->user) ||
-               !strequal(needle->passwd, check->passwd)) {
-              /* one of them was different */
-              continue;
-            }
-            credentialsMatch = TRUE;
           }
           match = TRUE;
         }

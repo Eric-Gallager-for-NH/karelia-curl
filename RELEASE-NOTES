@@ -26,7 +26,7 @@ This release includes the following changes:
  o checksrc: ban use of sprintf, vsprintf, strcat, strncat and gets
  o curl_global_init() now accepts the CURL_GLOBAL_ACK_EINTR flag [10]
  o Added CURLMOPT_MAX_HOST_CONNECTIONS, CURLMOPT_MAX_TOTAL_CONNECTIONS for
-   new multi interface connection handling.
+   new multi interface connection handling
  o Added CURLMOPT_MAX_PIPELINE_LENGTH, CURLMOPT_CONTENT_LENGTH_PENALTY_SIZE,
    CURLMOPT_CHUNK_LENGTH_PENALTY_SIZE, CURLMOPT_PIPELINING_SITE_BL and
    CURLMOPT_PIPELINING_SERVER_BL for new pipelining control [15]
@@ -35,7 +35,7 @@ This release includes the following bugfixes:
 
  o darwinssl: Fix build under Leopard
  o DONE: consider callback-aborted transfers premature [1]
- o ntlm: fix memory leak
+ o ntlm: Fixed memory leaks
  o smtp: Fixed an issue when processing EHLO failure responses
  o pop3: Fixed incorrect return value from pop3_endofresp()
  o pop3: Fixed SASL authentication capability detection
@@ -67,6 +67,19 @@ This release includes the following bugfixes:
  o HTTP proxy: insert slash in URL if missing [13]
  o hiperfifo: updated to use current libevent API [14]
  o getinmemory.c: abort the transfer nicely if not enough memory
+ o improved win32 memorytracking
+ o corrected proxy header response headers count [16]
+ o FTP quote operations on re-used connection [17]
+ o tcpkeepalive on win32 [18]
+ o tcpkeepalive on Mac OS X [23]
+ o easy: acknowledge the CURLOPT_MAXCONNECTS option properly [19]
+ o easy interface: restore default MAXCONNECTS to 5
+ o win32: don't set SO_SNDBUF for windows vista or later versions [20]
+ o HTTP: made cookie sort function more deterministic
+ o winssl: Fixed memory leak if connection was not successful
+ o FTP: wait on both connections during active STOR state [21]
+ o connect: treat a failed local bind of an interface as a non-fatal error [22]
+ o darwinssl: disable insecure ciphers by default
 
 This release includes the following known bugs:
 
@@ -81,7 +94,9 @@ advice from friends like these:
  Bruno de Carvalho, Rainer Jung, Jeremy Huddleston, Kim Vandry, Jiri Hruska,
  Alexander Klauer, Saran Neti, Alessandro Ghedini, Linus Nielsen Feltzing,
  Martin Jansen, John E. Malmberg, Tom Grace, Patrick Monnerat,
- Zdenek Pavlas, Myk Taylor, Cédric Deltheil
+ Zdenek Pavlas, Myk Taylor, Cédric Deltheil, Robert Wruck, Sam Deane,
+ Clemens Gruber, Marc Hoersken, Tomas Mlcoch, Fredrik Thulin, Steven Gu,
+ Andrew Kurushin, Christian Hägele, Daniel Theron
 
         Thanks! (and sorry if I forgot to mention someone)
 
@@ -102,4 +117,11 @@ References to bug reports and discussions on issues:
  [13] = http://curl.haxx.se/bug/view.cgi?id=1206
  [14] = http://curl.haxx.se/bug/view.cgi?id=1199
  [15] = http://daniel.haxx.se/blog/2013/03/26/better-pipelining-in-libcurl-7-30-0/
- 
+ [16] = http://curl.haxx.se/bug/view.cgi?id=1204
+ [17] = http://curl.haxx.se/mail/lib-2013-03/0319.html
+ [18] = http://curl.haxx.se/bug/view.cgi?id=1209
+ [19] = http://curl.haxx.se/bug/view.cgi?id=1212
+ [20] = http://curl.haxx.se/bug/view.cgi?id=1188
+ [21] = http://curl.haxx.se/bug/view.cgi?id=1183
+ [22] = http://curl.haxx.se/bug/view.cgi?id=1189
+ [23] = http://curl.haxx.se/bug/view.cgi?id=1214
