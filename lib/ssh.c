@@ -115,9 +115,9 @@ static LIBSSH2_FREE_FUNC(my_libssh2_free);
 
 static CURLcode get_pathname(const char **cpp, char **path);
 
-static int ssh_set_code_and_ssh_error(struct connectdata *conn, int code, int ssh_error);
-static int ssh_set_code_from_ssh_error_with_default_code(struct connectdata *conn, int ssh_error, int default_code);
-static int ssh_set_code_from_ssh_error(struct connectdata *conn, int ssh_error);
+static CURLcode ssh_set_code_and_ssh_error(struct connectdata *conn, CURLcode code, int ssh_error);
+static CURLcode ssh_set_code_from_ssh_error_with_default_code(struct connectdata *conn, int ssh_error, CURLcode default_code);
+static CURLcode ssh_set_code_from_ssh_error(struct connectdata *conn, int ssh_error);
 static void ssh_quote_fail(struct connectdata *conn, const char* format);
 
 static CURLcode ssh_connect(struct connectdata *conn, bool *done);
@@ -681,8 +681,10 @@ static CURLcode ssh_check_fingerprint(struct connectdata *conn)
     return ssh_knownhost(conn);
 }
 
-static int ssh_set_code_and_ssh_error(struct connectdata *conn, int code, int ssh_error)
+static CURLcode ssh_set_code_and_ssh_error(struct connectdata *conn, CURLcode code, int ssh_error)
 {
+    /* set the actualcode value explicitly */
+    /* the ssh_error value is returned to in httpcode and can be extracted with CURLINFO_RESPONSE_CODE */
     struct ssh_conn *sshc = &conn->proto.sshc;
     sshc->actualcode = code;
     struct SessionHandle *data = conn->data;
@@ -691,17 +693,20 @@ static int ssh_set_code_and_ssh_error(struct connectdata *conn, int code, int ss
     return code;
 }
 
-static int ssh_set_code_from_ssh_error_with_default_code(struct connectdata *conn, int ssh_error, int default_code)
+static CURLcode ssh_set_code_from_ssh_error_with_default_code(struct connectdata *conn, int ssh_error, CURLcode default_code)
 {
-    int code = libssh2_session_error_to_CURLE(ssh_error);
+    /* set the actualcode value from an SSH error value */
+    /* if the converted SSH error is zero, we use the supplied default_code value instead for actualcode */
+    CURLcode code = libssh2_session_error_to_CURLE(ssh_error);
     int result = ssh_set_code_and_ssh_error(conn, code ? code : default_code, ssh_error);
     DEBUGF(infof(conn->data, "error = %d makes libcurl = %d\n",
                  ssh_error, (int)result));
 
 }
 
-static int ssh_set_code_from_ssh_error(struct connectdata *conn, int ssh_error)
+static CURLcode ssh_set_code_from_ssh_error(struct connectdata *conn, int ssh_error)
 {
+    /* set the actualcode value from an SSH error value */
     return ssh_set_code_from_ssh_error_with_default_code(conn, ssh_error, CURLE_OK);
 }
 
@@ -710,7 +715,6 @@ static void ssh_quote_fail(struct connectdata *conn, const char* format)
     struct ssh_conn *sshc = &conn->proto.sshc;
     struct SessionHandle *data = conn->data;
     int err = sftp_libssh2_last_error(sshc->sftp_session);
-    data->info.httpcode = err;
     Curl_safefree(sshc->quote_path1);
     Curl_safefree(sshc->quote_path2);
     failf(data,format, sftp_libssh2_strerror(err));
