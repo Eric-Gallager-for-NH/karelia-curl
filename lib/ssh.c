@@ -115,6 +115,11 @@ static LIBSSH2_FREE_FUNC(my_libssh2_free);
 
 static CURLcode get_pathname(const char **cpp, char **path);
 
+static int ssh_set_code_and_ssh_error(struct connectdata *conn, int code, int ssh_error);
+static int ssh_set_code_from_ssh_error_with_default_code(struct connectdata *conn, int ssh_error, int default_code);
+static int ssh_set_code_from_ssh_error(struct connectdata *conn, int ssh_error);
+static void ssh_quote_fail(struct connectdata *conn, const char* format);
+
 static CURLcode ssh_connect(struct connectdata *conn, bool *done);
 static CURLcode ssh_multi_statemach(struct connectdata *conn, bool *done);
 static CURLcode ssh_do(struct connectdata *conn, bool *done);
@@ -688,10 +693,10 @@ static int ssh_set_code_and_ssh_error(struct connectdata *conn, int code, int ss
 
 static int ssh_set_code_from_ssh_error_with_default_code(struct connectdata *conn, int ssh_error, int default_code)
 {
-    int code = libssh2_session_error_to_CURLE(err);
+    int code = libssh2_session_error_to_CURLE(ssh_error);
     int result = ssh_set_code_and_ssh_error(conn, code ? code : default_code, ssh_error);
-    DEBUGF(infof(data, "error = %d makes libcurl = %d\n",
-                 ssh_err, (int)result));
+    DEBUGF(infof(conn->data, "error = %d makes libcurl = %d\n",
+                 ssh_error, (int)result));
 
 }
 
@@ -798,7 +803,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
         }
         else {
           state(conn, SSH_SESSION_FREE);
-          ssh_set_code_from_ssh_error(err);
+          ssh_set_code_from_ssh_error(conn, err);
           break;
         }
       }
@@ -856,7 +861,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
           Curl_safefree(home);
           Curl_safefree(sshc->rsa_pub);
           state(conn, SSH_SESSION_FREE);
-          ssh_set_code_and_ssh_error(CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
+          ssh_set_code_and_ssh_error(conn, CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
           break;
         }
 
@@ -1134,7 +1139,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
         sshc->homedir = strdup(tempHome);
         if(!sshc->homedir) {
           state(conn, SSH_SFTP_CLOSE);
-          ssh_set_code_and_ssh_error(CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
+          ssh_set_code_and_ssh_error(conn, CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
           break;
         }
         conn->data->state.most_recent_ftp_entrypath = sshc->homedir;
@@ -1823,13 +1828,13 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
       }
       if((sshc->readdir_filename = malloc(PATH_MAX+1)) == NULL) {
         state(conn, SSH_SFTP_CLOSE);
-        ssh_set_code_and_ssh_error(CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
+        ssh_set_code_and_ssh_error(conn, CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
         break;
       }
       if((sshc->readdir_longentry = malloc(PATH_MAX+1)) == NULL) {
         Curl_safefree(sshc->readdir_filename);
         state(conn, SSH_SFTP_CLOSE);
-        ssh_set_code_and_ssh_error(CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
+        ssh_set_code_and_ssh_error(conn, CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
         break;
       }
       state(conn, SSH_SFTP_READDIR);
@@ -1855,7 +1860,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
           tmpLine = aprintf("%s\n", sshc->readdir_filename);
           if(tmpLine == NULL) {
             state(conn, SSH_SFTP_CLOSE);
-            ssh_set_code_and_ssh_error(CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
+            ssh_set_code_and_ssh_error(conn, CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
             break;
           }
           result = Curl_client_write(conn, CLIENTWRITE_BODY,
@@ -1884,7 +1889,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
             Curl_safefree(sshc->readdir_filename);
             Curl_safefree(sshc->readdir_longentry);
             state(conn, SSH_SFTP_CLOSE);
-            ssh_set_code_and_ssh_error(CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
+            ssh_set_code_and_ssh_error(conn, CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
             break;
           }
 
@@ -1898,7 +1903,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
               Curl_safefree(sshc->readdir_filename);
               Curl_safefree(sshc->readdir_longentry);
               state(conn, SSH_SFTP_CLOSE);
-              ssh_set_code_and_ssh_error(CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
+              ssh_set_code_and_ssh_error(conn, CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
               break;
             }
 
@@ -1950,7 +1955,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
         Curl_safefree(sshc->readdir_filename);
         Curl_safefree(sshc->readdir_longentry);
         state(conn, SSH_SFTP_CLOSE);
-        ssh_set_code_and_ssh_error(CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
+        ssh_set_code_and_ssh_error(conn, CURLE_OUT_OF_MEMORY, LIBSSH2_ERROR_NONE);
         break;
       }
       sshc->readdir_line = new_readdir_line;
@@ -2026,7 +2031,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
           failf(data, "Could not open remote file for reading: %s",
                 sftp_libssh2_strerror(err));
           state(conn, SSH_SFTP_CLOSE);
-          result = ssh_set_code_from_ssh_error_with_default_code(err, CURLE_SSH);
+          result = ssh_set_code_from_ssh_error_with_default_code(conn, err, CURLE_SSH);
           break;
         }
       }
@@ -2148,7 +2153,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
     }
     if(result) {
       state(conn, SSH_SFTP_CLOSE);
-      ssh_set_code_and_ssh_error(result, LIBSSH2_ERROR_NONE);
+      ssh_set_code_and_ssh_error(conn, result, LIBSSH2_ERROR_NONE);
     }
     else {
       state(conn, SSH_STOP);
@@ -2262,7 +2267,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
                                                      &err_msg, NULL, 0));
           failf(conn->data, "%s", err_msg);
           state(conn, SSH_SCP_CHANNEL_FREE);
-          ssh_set_code_from_ssh_error(ssh_err);
+          ssh_set_code_from_ssh_error(conn, ssh_err);
           break;
         }
       }
@@ -2317,7 +2322,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
                                                      &err_msg, NULL, 0));
           failf(conn->data, "%s", err_msg);
           state(conn, SSH_SCP_CHANNEL_FREE);
-          ssh_set_code_from_ssh_error(ssh_err);
+          ssh_set_code_from_ssh_error(conn, ssh_err);
           break;
         }
       }
