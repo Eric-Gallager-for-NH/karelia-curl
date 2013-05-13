@@ -448,6 +448,7 @@ static CURLcode smtp_perform_upgrade_tls(struct connectdata *conn)
 static CURLcode smtp_perform_authenticate(struct connectdata *conn)
 {
   CURLcode result = CURLE_OK;
+  struct SessionHandle *data = conn->data;
   struct smtp_conn *smtpc = &conn->proto.smtpc;
   const char *mech = NULL;
   char *initresp = NULL;
@@ -487,10 +488,12 @@ static CURLcode smtp_perform_authenticate(struct connectdata *conn)
     state1 = SMTP_AUTH_NTLM;
     state2 = SMTP_AUTH_NTLM_TYPE2MSG;
     smtpc->authused = SASL_MECH_NTLM;
-    result = Curl_sasl_create_ntlm_type1_message(conn->user, conn->passwd,
-                                                 &conn->ntlm,
-                                                 &initresp, &len);
-  }
+
+    if(data->set.sasl_ir)
+      result = Curl_sasl_create_ntlm_type1_message(conn->user, conn->passwd,
+                                                   &conn->ntlm,
+                                                   &initresp, &len);
+    }
   else
 #endif
   if((smtpc->authmechs & SASL_MECH_LOGIN) &&
@@ -499,8 +502,10 @@ static CURLcode smtp_perform_authenticate(struct connectdata *conn)
     state1 = SMTP_AUTH_LOGIN;
     state2 = SMTP_AUTH_LOGIN_PASSWD;
     smtpc->authused = SASL_MECH_LOGIN;
-    result = Curl_sasl_create_login_message(conn->data, conn->user,
-                                            &initresp, &len);
+
+    if(data->set.sasl_ir)
+      result = Curl_sasl_create_login_message(conn->data, conn->user,
+                                              &initresp, &len);
   }
   else if((smtpc->authmechs & SASL_MECH_PLAIN) &&
           (smtpc->prefmech & SASL_MECH_PLAIN)) {
@@ -508,32 +513,36 @@ static CURLcode smtp_perform_authenticate(struct connectdata *conn)
     state1 = SMTP_AUTH_PLAIN;
     state2 = SMTP_AUTH_FINAL;
     smtpc->authused = SASL_MECH_PLAIN;
-    result = Curl_sasl_create_plain_message(conn->data, conn->user,
-                                            conn->passwd, &initresp, &len);
-  }
-  else {
-    /* Other mechanisms not supported */
-    infof(conn->data, "No known authentication mechanisms supported!\n");
-    result = CURLE_LOGIN_DENIED;
+
+    if(data->set.sasl_ir)
+      result = Curl_sasl_create_plain_message(conn->data, conn->user,
+                                              conn->passwd, &initresp, &len);
   }
 
   if(!result) {
-    /* Perform SASL based authentication */
-    if(initresp &&
-       strlen(mech) + len <= 512 - 8) { /* AUTH <mech> ...<crlf> */
-       result = Curl_pp_sendf(&smtpc->pp, "AUTH %s %s", mech, initresp);
+    if(mech) {
+      /* Perform SASL based authentication */
+      if(initresp &&
+         8 + strlen(mech) + len <= 512) { /* AUTH <mech> ...<crlf> */
+        result = Curl_pp_sendf(&smtpc->pp, "AUTH %s %s", mech, initresp);
 
-      if(!result)
-        state(conn, state2);
+        if(!result)
+          state(conn, state2);
+      }
+      else {
+        result = Curl_pp_sendf(&smtpc->pp, "AUTH %s", mech);
+
+        if(!result)
+          state(conn, state1);
+      }
+
+      Curl_safefree(initresp);
     }
     else {
-      result = Curl_pp_sendf(&smtpc->pp, "AUTH %s", mech);
-
-      if(!result)
-        state(conn, state1);
+      /* Other mechanisms not supported */
+      infof(conn->data, "No known authentication mechanisms supported!\n");
+      result = CURLE_LOGIN_DENIED;
     }
-
-    Curl_safefree(initresp);
   }
 
   return result;
@@ -555,7 +564,7 @@ static CURLcode smtp_perform_mail(struct connectdata *conn)
 
   /* Calculate the FROM parameter */
   if(!data->set.str[STRING_MAIL_FROM])
-    /* Null reverse-path, RFC-2821, sect. 3.7 */
+    /* Null reverse-path, RFC-5321, sect. 3.6.3 */
     from = strdup("<>");
   else if(data->set.str[STRING_MAIL_FROM][0] == '<')
     from = aprintf("%s", data->set.str[STRING_MAIL_FROM]);
@@ -580,7 +589,7 @@ static CURLcode smtp_perform_mail(struct connectdata *conn)
     }
   }
 
-  /* calculate the optional SIZE parameter */
+  /* Calculate the optional SIZE parameter */
   if(conn->proto.smtpc.size_supported && conn->data->set.infilesize > 0) {
     size = aprintf("%" FORMAT_OFF_T, data->set.infilesize);
 
@@ -1163,12 +1172,17 @@ static CURLcode smtp_state_rcpt_resp(struct connectdata *conn, int smtpcode,
 static CURLcode smtp_state_data_resp(struct connectdata *conn, int smtpcode,
                                      smtpstate instate)
 {
+  struct SessionHandle *data = conn->data;
+
   (void)instate; /* no use for this yet */
 
   if(smtpcode != 354) {
     state(conn, SMTP_STOP);
     return CURLE_SEND_ERROR;
   }
+
+  /* Set the progress upload size */
+  Curl_pgrsSetUploadSize(data, data->set.infilesize);
 
   /* SMTP upload */
   Curl_setup_transfer(conn, -1, -1, FALSE, NULL, FIRSTSOCKET, NULL);
@@ -1441,6 +1455,9 @@ static CURLcode smtp_done(struct connectdata *conn, CURLcode status,
   CURLcode result = CURLE_OK;
   struct SessionHandle *data = conn->data;
   struct SMTP *smtp = data->state.proto.smtp;
+  struct pingpong *pp = &conn->proto.smtpc.pp;
+  const char *eob;
+  ssize_t len;
   ssize_t bytes_written;
 
   (void)premature;
@@ -1457,25 +1474,27 @@ static CURLcode smtp_done(struct connectdata *conn, CURLcode status,
     result = status;         /* use the already set error code */
   }
   else if(!data->set.connect_only) {
-    struct smtp_conn *smtpc = &conn->proto.smtpc;
-    struct pingpong *pp = &smtpc->pp;
+    /* Calculate the EOB taking into account any terminating CRLF from the
+       previous line of the email or the CRLF of the DATA command when there
+       is "no mail data". RFC-5321, sect. 4.1.1.4. */
+    eob = SMTP_EOB;
+    len = SMTP_EOB_LEN;
+    if(smtp->trailing_crlf || !conn->data->set.infilesize) {
+      eob += 2;
+      len -= 2;
+    }
 
     /* Send the end of block data */
-    result = Curl_write(conn,
-                        conn->writesockfd,  /* socket to send to */
-                        SMTP_EOB,           /* buffer pointer */
-                        SMTP_EOB_LEN,       /* buffer size */
-                        &bytes_written);    /* actually sent away */
-
+    result = Curl_write(conn, conn->writesockfd, eob, len, &bytes_written);
     if(result)
       return result;
 
-    if(bytes_written != SMTP_EOB_LEN) {
+    if(bytes_written != len) {
       /* The whole chunk was not sent so keep it around and adjust the
          pingpong structure accordingly */
-      pp->sendthis = strdup(SMTP_EOB);
-      pp->sendsize = SMTP_EOB_LEN;
-      pp->sendleft = SMTP_EOB_LEN - bytes_written;
+      pp->sendthis = strdup(eob);
+      pp->sendsize = len;
+      pp->sendleft = len - bytes_written;
     }
     else
       /* Successfully sent so adjust the response timeout relative to now */
@@ -1778,12 +1797,12 @@ CURLcode Curl_smtp_escape_eob(struct connectdata *conn, ssize_t nread)
      they are sent as CRLF.. instead, as a . on the beginning of a line will
      be deleted by the server when not part of an EOB terminator and a
      genuine CRLF.CRLF which isn't escaped will wrongly be detected as end of
-     data by the server.
+     data by the server
   */
   ssize_t i;
   ssize_t si;
-  struct smtp_conn *smtpc = &conn->proto.smtpc;
   struct SessionHandle *data = conn->data;
+  struct SMTP *smtp = data->state.proto.smtp;
 
   /* Do we need to allocate the scatch buffer? */
   if(!data->state.scratch) {
@@ -1798,36 +1817,46 @@ CURLcode Curl_smtp_escape_eob(struct connectdata *conn, ssize_t nread)
   /* This loop can be improved by some kind of Boyer-Moore style of
      approach but that is saved for later... */
   for(i = 0, si = 0; i < nread; i++) {
-    if(SMTP_EOB[smtpc->eob] == data->req.upload_fromhere[i])
-      smtpc->eob++;
-    else if(smtpc->eob) {
+    if(SMTP_EOB[smtp->eob] == data->req.upload_fromhere[i]) {
+      smtp->eob++;
+
+      /* Is the EOB potentially the terminating CRLF? */
+      if(2 == smtp->eob || SMTP_EOB_LEN == smtp->eob)
+        smtp->trailing_crlf = TRUE;
+      else
+        smtp->trailing_crlf = FALSE;
+    }
+    else if(smtp->eob) {
       /* A previous substring matched so output that first */
-      memcpy(&data->state.scratch[si], SMTP_EOB, smtpc->eob);
-      si += smtpc->eob;
+      memcpy(&data->state.scratch[si], SMTP_EOB, smtp->eob);
+      si += smtp->eob;
 
       /* Then compare the first byte */
       if(SMTP_EOB[0] == data->req.upload_fromhere[i])
-        smtpc->eob = 1;
+        smtp->eob = 1;
       else
-        smtpc->eob = 0;
+        smtp->eob = 0;
+
+      /* Reset the trailing CRLF flag as there was more data */
+      smtp->trailing_crlf = FALSE;
     }
 
-    /* Do we have a match for CRLF. as per RFC-2821, sect. 4.5.2 */
-    if(SMTP_EOB_FIND_LEN == smtpc->eob) {
+    /* Do we have a match for CRLF. as per RFC-5321, sect. 4.5.2 */
+    if(SMTP_EOB_FIND_LEN == smtp->eob) {
       /* Copy the replacement data to the target buffer */
       memcpy(&data->state.scratch[si], SMTP_EOB_REPL, SMTP_EOB_REPL_LEN);
       si += SMTP_EOB_REPL_LEN;
-      smtpc->eob = 0;
+      smtp->eob = 0;
     }
-    else if(!smtpc->eob)
+    else if(!smtp->eob)
       data->state.scratch[si++] = data->req.upload_fromhere[i];
   }
 
-  if(smtpc->eob) {
+  if(smtp->eob) {
     /* A substring matched before processing ended so output that now */
-    memcpy(&data->state.scratch[si], SMTP_EOB, smtpc->eob);
-    si += smtpc->eob;
-    smtpc->eob = 0;
+    memcpy(&data->state.scratch[si], SMTP_EOB, smtp->eob);
+    si += smtp->eob;
+    smtp->eob = 0;
   }
 
   if(si != nread) {

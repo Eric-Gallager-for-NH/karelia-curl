@@ -243,6 +243,7 @@ struct curl_schannel_cred {
   CredHandle cred_handle;
   TimeStamp time_stamp;
   int refcount;
+  bool cached;
 };
 
 struct curl_schannel_ctxt {
@@ -1563,6 +1564,7 @@ struct UserDefined {
   long socks5_gssapi_nec; /* flag to support nec socks5 server */
 #endif
   struct curl_slist *mail_rcpt; /* linked list of mail recipients */
+  bool sasl_ir;         /* Enable/disable SASL initial response */
   /* Common RTSP header options */
   Curl_RtspReq rtspreq; /* RTSP request type */
   long rtspversion; /* like httpversion, for RTSP */

@@ -525,6 +525,7 @@ static CURLcode imap_perform_login(struct connectdata *conn)
 static CURLcode imap_perform_authenticate(struct connectdata *conn)
 {
   CURLcode result = CURLE_OK;
+  struct SessionHandle *data = conn->data;
   struct imap_conn *imapc = &conn->proto.imapc;
   const char *mech = NULL;
   char *initresp = NULL;
@@ -565,7 +566,7 @@ static CURLcode imap_perform_authenticate(struct connectdata *conn)
     state2 = IMAP_AUTHENTICATE_NTLM_TYPE2MSG;
     imapc->authused = SASL_MECH_NTLM;
 
-    if(imapc->ir_supported)
+    if(imapc->ir_supported || data->set.sasl_ir)
       result = Curl_sasl_create_ntlm_type1_message(conn->user, conn->passwd,
                                                    &conn->ntlm,
                                                    &initresp, &len);
@@ -579,7 +580,7 @@ static CURLcode imap_perform_authenticate(struct connectdata *conn)
     state2 = IMAP_AUTHENTICATE_LOGIN_PASSWD;
     imapc->authused = SASL_MECH_LOGIN;
 
-    if(imapc->ir_supported)
+    if(imapc->ir_supported || data->set.sasl_ir)
       result = Curl_sasl_create_login_message(conn->data, conn->user,
                                               &initresp, &len);
   }
@@ -590,38 +591,37 @@ static CURLcode imap_perform_authenticate(struct connectdata *conn)
     state2 = IMAP_AUTHENTICATE_FINAL;
     imapc->authused = SASL_MECH_PLAIN;
 
-    if(imapc->ir_supported)
+    if(imapc->ir_supported || data->set.sasl_ir)
       result = Curl_sasl_create_plain_message(conn->data, conn->user,
                                               conn->passwd, &initresp, &len);
   }
 
-  if(result)
-    return result;
+  if(!result) {
+    if(mech) {
+      /* Perform SASL based authentication */
+      if(initresp) {
+        result = imap_sendf(conn, "AUTHENTICATE %s %s", mech, initresp);
 
-  if(mech) {
-    /* Perform SASL based authentication */
-    if(initresp) {
-      result = imap_sendf(conn, "AUTHENTICATE %s %s", mech, initresp);
+        if(!result)
+          state(conn, state2);
+      }
+      else {
+        result = imap_sendf(conn, "AUTHENTICATE %s", mech);
 
-      if(!result)
-        state(conn, state2);
+        if(!result)
+          state(conn, state1);
+      }
+
+      Curl_safefree(initresp);
     }
+    else if(!imapc->login_disabled)
+      /* Perform clear text authentication */
+      result = imap_perform_login(conn);
     else {
-      result = imap_sendf(conn, "AUTHENTICATE %s", mech);
-
-      if(!result)
-        state(conn, state1);
+      /* Other mechanisms not supported */
+      infof(conn->data, "No known authentication mechanisms supported!\n");
+      result = CURLE_LOGIN_DENIED;
     }
-
-    Curl_safefree(initresp);
-  }
-  else if(!imapc->login_disabled)
-    /* Perform clear text authentication */
-    result = imap_perform_login(conn);
-  else {
-    /* Other mechanisms not supported */
-    infof(conn->data, "No known authentication mechanisms supported!\n");
-    result = CURLE_LOGIN_DENIED;
   }
 
   return result;

@@ -581,12 +581,13 @@ sub protocolsetup {
             'EXAMINE' => \&EXAMINE_imap,
             'FETCH'  => \&FETCH_imap,
             'LIST'   => \&LIST_imap,
+            'LOGOUT'   => \&LOGOUT_imap,
             'SELECT' => \&SELECT_imap,
+            'STATUS'  => \&STATUS_imap,
             'STORE'  => \&STORE_imap
         );
         %displaytext = (
-            'LOGIN'  => ' OK We are happy you popped in!',
-            'LOGOUT' => ' OK thanks for the fish',
+            'LOGIN'  => ' OK LOGIN completed',
             'welcome' => join("",
             '        _   _ ____  _     '."\r\n",
             '    ___| | | |  _ \| |    '."\r\n",
@@ -1000,6 +1001,39 @@ sub EXAMINE_imap {
     sendcontrol "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n";
     sendcontrol "* OK [PERMANENTFLAGS ()] No permanent flags permitted\r\n";
     sendcontrol "$cmdid OK [READ-ONLY] EXAMINE completed\r\n";
+
+    return 0;
+}
+
+sub STATUS_imap {
+    my ($testno) = @_;
+    fix_imap_params($testno);
+
+    logmsg "STATUS_imap got test $testno\n";
+
+    $testno =~ s/[^0-9]//g;
+    my $testpart = "";
+    if ($testno > 10000) {
+        $testpart = $testno % 10000;
+        $testno = int($testno / 10000);
+    }
+
+    loadtest("$srcdir/data/test$testno");
+
+    my @data = getpart("reply", "data$testpart");
+
+    for my $d (@data) {
+        sendcontrol $d;
+    }
+
+    sendcontrol "$cmdid OK STATUS completed\r\n";
+
+    return 0;
+}
+
+sub LOGOUT_imap {
+    sendcontrol "* BYE cURL IMAP server signing off\r\n";
+    sendcontrol "$cmdid OK LOGOUT completed\r\n";
 
     return 0;
 }
