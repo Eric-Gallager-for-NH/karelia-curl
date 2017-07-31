@@ -944,7 +944,10 @@ static OSStatus CopyIdentityFromPKCS12File(const char *cPath,
 #if CURL_BUILD_MAC_10_7 || CURL_BUILD_IOS
   if(CFURLCreateDataAndPropertiesFromResource(NULL, pkcs_url, &pkcs_data,
     NULL, NULL, &status)) {
-    const void *cKeys[] = {kSecImportExportPassphrase};
+    // Use the raw string instead of the constant because referring to the constant kSecImportExportPassphrase
+    // makes the app fail to launch on OS X 10.6 -AK 7/31/2017
+//  const void *cKeys[] = {kSecImportExportPassphrase};
+    const void *cKeys[] = {CFSTR("passphrase")};
     const void *cValues[] = {password};
     CFDictionaryRef options = CFDictionaryCreate(NULL, cKeys, cValues,
       password ? 1L : 0L, NULL, NULL);
@@ -954,8 +957,11 @@ static OSStatus CopyIdentityFromPKCS12File(const char *cPath,
     status = SecPKCS12Import(pkcs_data, options, &items);
     if(status == noErr) {
       CFDictionaryRef identity_and_trust = CFArrayGetValueAtIndex(items, 0L);
-      const void *temp_identity = CFDictionaryGetValue(identity_and_trust,
-        kSecImportItemIdentity);
+//    const void *temp_identity = CFDictionaryGetValue(identity_and_trust,
+//      kSecImportItemIdentity);
+
+      // Do the same for kSecImportItemIdentity -AK
+      const void *temp_identity = CFDictionaryGetValue(identity_and_trust, CFSTR("identity"));
 
       /* Retain the identity; we don't care about any other data... */
       CFRetain(temp_identity);
